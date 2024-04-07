@@ -1,0 +1,3 @@
+class ComCfgOriginate(object):
+    pass
+
