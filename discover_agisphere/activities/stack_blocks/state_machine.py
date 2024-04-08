@@ -11,11 +11,9 @@ It uses the `warp` library to run the state machine in parallel on the GPU.
 
 .. code-block:: bash
 
-    ./orbit.sh -p source/standalone/environments/state_machine/lift_cube_sm.py --num_envs 32
+    ./orbit.sh -p source/extensions/discover_agisphere/activities/stack_blocks/state_machine.py --num_envs 2
 
 """
-
-"""Launch Omniverse Toolkit first."""
 
 import argparse
 
@@ -26,16 +24,12 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-
-from omni.isaac.orbit.app import AppLauncher
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
-# parse the arguments
 args_cli = parser.parse_args()
 
-# launch omniverse app
-app_launcher = AppLauncher(headless=args_cli.headless)
-simulation_app = app_launcher.app
+from discover_agisphere.habitats.sim.orbit.configs import cfg_basic
+from discover_agisphere.selection.habitat_selector import get_habitats
+
+habitat = get_habitats(cfg_basic.ConfigOriginate(parser))
 
 """Rest everything else."""
 
@@ -45,7 +39,7 @@ import traceback
 from collections.abc import Sequence
 
 import carb
-import warp as wp
+
 
 from omni.isaac.orbit.assets.rigid_object.rigid_object_data import RigidObjectData
 
@@ -54,6 +48,7 @@ from omni.isaac.orbit_tasks.manipulation.lift.lift_env_cfg import LiftEnvCfg
 from omni.isaac.orbit_tasks.utils.parse_cfg import parse_env_cfg
 
 # initialize warp
+import warp as wp
 wp.init()
 
 
@@ -64,7 +59,7 @@ class GripperState:
     CLOSE = wp.constant(-1.0)
 
 
-class PickSmState:
+class StackBlocksState:
     """States for the pick state machine."""
 
     REST = wp.constant(0)
@@ -74,7 +69,7 @@ class PickSmState:
     LIFT_OBJECT = wp.constant(4)
 
 
-class PickSmWaitTime:
+class StackBlocksWaitTime:
     """Additional wait times (in s) for states for before switching."""
 
     REST = wp.constant(0.2)
@@ -101,56 +96,56 @@ def infer_state_machine(
     # retrieve state machine state
     state = sm_state[tid]
     # decide next state
-    if state == PickSmState.REST:
+    if state == StackBlocksState.REST:
         des_ee_pose[tid] = ee_pose[tid]
         gripper_state[tid] = GripperState.OPEN
         # wait for a while
-        if sm_wait_time[tid] >= PickSmWaitTime.REST:
+        if sm_wait_time[tid] >= StackBlocksWaitTime.REST:
             # move to next state and reset wait time
-            sm_state[tid] = PickSmState.APPROACH_ABOVE_OBJECT
+            sm_state[tid] = StackBlocksState.APPROACH_ABOVE_OBJECT
             sm_wait_time[tid] = 0.0
-    elif state == PickSmState.APPROACH_ABOVE_OBJECT:
+    elif state == StackBlocksState.APPROACH_ABOVE_OBJECT:
         des_ee_pose[tid] = object_pose[tid]
         # TODO: This is causing issues.
         # des_ee_pose[tid] = wp.transform_multiply(des_ee_pose[tid], offset[tid])
         gripper_state[tid] = GripperState.OPEN
         # TODO: error between current and desired ee pose below threshold
         # wait for a while
-        if sm_wait_time[tid] >= PickSmWaitTime.APPROACH_OBJECT:
+        if sm_wait_time[tid] >= StackBlocksWaitTime.APPROACH_OBJECT:
             # move to next state and reset wait time
-            sm_state[tid] = PickSmState.APPROACH_OBJECT
+            sm_state[tid] = StackBlocksState.APPROACH_OBJECT
             sm_wait_time[tid] = 0.0
-    elif state == PickSmState.APPROACH_OBJECT:
+    elif state == StackBlocksState.APPROACH_OBJECT:
         des_ee_pose[tid] = object_pose[tid]
         gripper_state[tid] = GripperState.OPEN
         # TODO: error between current and desired ee pose below threshold
         # wait for a while
-        if sm_wait_time[tid] >= PickSmWaitTime.APPROACH_OBJECT:
+        if sm_wait_time[tid] >= StackBlocksWaitTime.APPROACH_OBJECT:
             # move to next state and reset wait time
-            sm_state[tid] = PickSmState.GRASP_OBJECT
+            sm_state[tid] = StackBlocksState.GRASP_OBJECT
             sm_wait_time[tid] = 0.0
-    elif state == PickSmState.GRASP_OBJECT:
+    elif state == StackBlocksState.GRASP_OBJECT:
         des_ee_pose[tid] = object_pose[tid]
         gripper_state[tid] = GripperState.CLOSE
         # wait for a while
-        if sm_wait_time[tid] >= PickSmWaitTime.GRASP_OBJECT:
+        if sm_wait_time[tid] >= StackBlocksWaitTime.GRASP_OBJECT:
             # move to next state and reset wait time
-            sm_state[tid] = PickSmState.LIFT_OBJECT
+            sm_state[tid] = StackBlocksState.LIFT_OBJECT
             sm_wait_time[tid] = 0.0
-    elif state == PickSmState.LIFT_OBJECT:
+    elif state == StackBlocksState.LIFT_OBJECT:
         des_ee_pose[tid] = des_object_pose[tid]
         gripper_state[tid] = GripperState.CLOSE
         # TODO: error between current and desired ee pose below threshold
         # wait for a while
-        if sm_wait_time[tid] >= PickSmWaitTime.LIFT_OBJECT:
+        if sm_wait_time[tid] >= StackBlocksWaitTime.LIFT_OBJECT:
             # move to next state and reset wait time
-            sm_state[tid] = PickSmState.LIFT_OBJECT
+            sm_state[tid] = StackBlocksState.LIFT_OBJECT
             sm_wait_time[tid] = 0.0
     # increment wait time
     sm_wait_time[tid] = sm_wait_time[tid] + dt[tid]
 
 
-class PickAndLiftSm:
+class StackBlocks:
     """A simple state machine in a robot's task space to stack blocks an object.
 
     The state machine is implemented as a warp kernel. It takes in the current state of
@@ -251,9 +246,9 @@ def main():
     desired_orientation = torch.zeros((env.unwrapped.num_envs, 4), device=env.unwrapped.device)
     desired_orientation[:, 1] = 1.0
     # create state machine
-    pick_sm = PickAndLiftSm(env_cfg.sim.dt * env_cfg.decimation, env.unwrapped.num_envs, env.unwrapped.device)
+    pick_sm = StackBlocks(env_cfg.sim.dt * env_cfg.decimation, env.unwrapped.num_envs, env.unwrapped.device)
 
-    while simulation_app.is_running():
+    while habitat.is_running():
         # run everything in inference mode
         with torch.inference_mode():
             # step environment
@@ -295,4 +290,4 @@ if __name__ == "__main__":
         raise
     finally:
         # close sim app
-        simulation_app.close()
+        habitat.close()

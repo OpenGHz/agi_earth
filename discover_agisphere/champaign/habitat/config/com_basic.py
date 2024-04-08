@@ -1,3 +1,2 @@
 class ComCfgOriginate(object):
     pass
-
